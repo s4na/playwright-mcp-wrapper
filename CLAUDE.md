@@ -1,147 +1,149 @@
-# playwright-mcp-wrapper Codebase Summary for Claude
+# playwright-mcp-wrapper Claude用コードベース要約
 
-This file contains a concise summary of the playwright-mcp-wrapper codebase to provide context for Claude when working with this project.
+このファイルは、playwright-mcp-wrapperコードベースの簡潔な要約を含み、このプロジェクトで作業する際のClaudeのコンテキストを提供します。
 
-## Project Overview
+## プロジェクト概要
 
-**playwright-mcp-wrapper** is a session-aware wrapper for Playwright MCP (Model Context Protocol) that solves the critical problem of browser context isolation when multiple Claude Code sessions interact with the same Playwright MCP instance.
+**playwright-mcp-wrapper**は、複数のClaude Codeセッションが同じPlaywright MCPインスタンスと対話する際のブラウザコンテキスト分離の重要な問題を解決する、セッション対応のPlaywright MCP（Model Context Protocol）ラッパーです。
 
-### Problem Statement
-- When multiple Claude Code sessions connect to a single Playwright MCP instance on the same port, browser contexts get mixed up between different conversations
-- This leads to session interference and unpredictable behavior
+### 課題
 
-### Solution
-- A transparent HTTP proxy wrapper that automatically spawns isolated Playwright MCP instances per Claude Code session
-- Each session gets its own dedicated Playwright MCP process with a unique port
-- Zero additional user configuration required - just use `claude mcp add` as normal
+- 複数のClaude Codeセッションが同じポート上の単一のPlaywright MCPインスタンスに接続すると、異なる会話間でブラウザコンテキストが混在してしまう
+- これによりセッション間の干渉と予測不可能な動作が発生する
 
-## Architecture
+### 解決策
 
-### Core Components
+- Claude Codeセッションごとに分離されたPlaywright MCPインスタンスを自動的に生成する透過的なHTTPプロキシラッパー
+- 各セッションは固有のポートを持つ専用のPlaywright MCPプロセスを取得
+- 追加のユーザー設定は不要 - 通常通り`claude mcp add`を使用するだけ
 
-1. **Wrapper MCP (Session Router)**
-   - HTTP endpoint at `POST /mcp` (JSON-RPC) and `GET /mcp` (SSE)
-   - Manages session lifecycle using `Mcp-Session-Id` header from Streamable-HTTP transport
-   - Spawns Playwright MCP child processes on-demand
-   - Routes requests to appropriate Playwright MCP instances based on session ID
+## アーキテクチャ
 
-2. **Session Registry**
-   - In-memory map: `sessionId → {port, childPid, lastSeen}`
-   - Tracks active sessions and their corresponding Playwright MCP processes
+### コアコンポーネント
 
-3. **Port Allocation Algorithm**
-   - Deterministic port assignment: `20000 + (SHA256(sessionId)[0:4] % 20000)`
-   - Range: 20000-39999 to avoid conflicts
+1. **ラッパーMCP（セッションルーター）**
+   - `POST /mcp`（JSON-RPC）と`GET /mcp`（SSE）のHTTPエンドポイント
+   - Streamable-HTTPトランスポートからの`Mcp-Session-Id`ヘッダーを使用してセッションライフサイクルを管理
+   - オンデマンドでPlaywright MCP子プロセスを生成
+   - セッションIDに基づいて適切なPlaywright MCPインスタンスにリクエストをルーティング
 
-### Request Flow
+2. **セッションレジストリ**
+   - インメモリマップ: `sessionId → {port, childPid, lastSeen}`
+   - アクティブなセッションとそれに対応するPlaywright MCPプロセスを追跡
 
-1. Claude Code sends initial `initialize` request
-2. Wrapper generates UUID session ID if not present
-3. Wrapper spawns Playwright MCP on calculated port
-4. Wrapper returns `Mcp-Session-Id` header in response
-5. Claude Code automatically includes this header in subsequent requests
-6. Wrapper routes all requests to the appropriate Playwright MCP instance
+3. **ポート割り当てアルゴリズム**
+   - 決定論的ポート割り当て: `20000 + (SHA256(sessionId)[0:4] % 20000)`
+   - 範囲: 20000-39999（競合を避けるため）
 
-### Lifecycle Management
+### リクエストフロー
 
-- Processes are spawned lazily on first request
-- Keep-alive: 60 seconds after last activity
-- Clean shutdown: SIGTERM → SIGKILL sequence
-- Automatic cleanup of idle sessions
+1. Claude Codeが初期`initialize`リクエストを送信
+2. ラッパーが存在しない場合はUUIDセッションIDを生成
+3. ラッパーが計算されたポートでPlaywright MCPを生成
+4. ラッパーがレスポンスで`Mcp-Session-Id`ヘッダーを返す
+5. Claude Codeは後続のリクエストでこのヘッダーを自動的に含める
+6. ラッパーはすべてのリクエストを適切なPlaywright MCPインスタンスにルーティング
 
-## Technical Stack
+### ライフサイクル管理
 
-- **Language**: TypeScript/Node.js
-- **Web Framework**: Fastify
-- **HTTP Proxy**: @fastify/http-proxy
-- **Process Management**: Node.js child_process
-- **Session ID**: UUID v4
-- **Port Hashing**: SHA-256
+- プロセスは最初のリクエスト時に遅延生成される
+- キープアライブ: 最後のアクティビティから60秒
+- クリーンシャットダウン: SIGTERM → SIGKILLシーケンス
+- アイドルセッションの自動クリーンアップ
 
-## Security Considerations
+## 技術スタック
 
-- Binds only to 127.0.0.1 (localhost)
-- Origin header validation for DNS rebinding protection
-- No TLS required for local-only deployment
-- For external exposure: Use Nginx + Mutual TLS
+- **言語**: TypeScript/Node.js
+- **Webフレームワーク**: Fastify
+- **HTTPプロキシ**: @fastify/http-proxy
+- **プロセス管理**: Node.js child_process
+- **セッションID**: UUID v4
+- **ポートハッシュ**: SHA-256
 
-## Installation & Usage
+## セキュリティ考慮事項
+
+- 127.0.0.1（localhost）にのみバインド
+- DNSリバインディング保護のためのOriginヘッダー検証
+- ローカルのみのデプロイメントではTLSは不要
+- 外部公開の場合: Nginx + 相互TLSを使用
+
+## インストールと使用方法
 
 ```bash
-# Install wrapper
+# ラッパーをインストール
 npm i -g wrapper-mcp
 
-# Start wrapper
+# ラッパーを起動
 wrapper-mcp --port 4000 &
 
-# Register with Claude Code
+# Claude Codeに登録
 claude mcp add --transport http browser http://127.0.0.1:4000/mcp
 ```
 
-## Implementation Status
+## 実装状況
 
-**Current State**: Design phase - no implementation code exists yet
+**現在の状態**: 設計フェーズ - 実装コードはまだ存在しません
 
-### Next Steps for Implementation
+### 実装の次のステップ
 
-1. **Core HTTP Server**
-   - Set up Fastify server with proper middleware
-   - Implement JSON-RPC and SSE endpoints
-   - Add session ID header handling
+1. **コアHTTPサーバー**
+   - 適切なミドルウェアでFastifyサーバーをセットアップ
+   - JSON-RPCとSSEエンドポイントを実装
+   - セッションIDヘッダー処理を追加
 
-2. **Session Management**
-   - Create session registry with Map structure
-   - Implement port calculation algorithm
-   - Add session timeout logic
+2. **セッション管理**
+   - Map構造でセッションレジストリを作成
+   - ポート計算アルゴリズムを実装
+   - セッションタイムアウトロジックを追加
 
-3. **Process Management**
-   - Implement child process spawning for playwright-mcp
-   - Add health checking and retry logic
-   - Handle graceful shutdown
+3. **プロセス管理**
+   - playwright-mcp用の子プロセス生成を実装
+   - ヘルスチェックとリトライロジックを追加
+   - グレースフルシャットダウンを処理
 
-4. **Proxy Logic**
-   - Set up HTTP proxy for JSON-RPC requests
-   - Implement SSE streaming proxy
-   - Add error handling and fallback
+4. **プロキシロジック**
+   - JSON-RPCリクエスト用のHTTPプロキシをセットアップ
+   - SSEストリーミングプロキシを実装
+   - エラー処理とフォールバックを追加
 
-5. **Testing**
-   - Unit tests for port calculation
-   - Integration tests for session isolation
-   - Load tests for concurrent sessions
+5. **テスト**
+   - ポート計算のユニットテスト
+   - セッション分離の統合テスト
+   - 同時セッションの負荷テスト
 
-## Key Design Decisions
+## 主要な設計決定
 
-1. **Why HTTP Transport?**
-   - Simplest integration with Claude Code
-   - Built-in session support via headers
-   - No additional configuration needed
+1. **なぜHTTPトランスポート？**
+   - Claude Codeとの最もシンプルな統合
+   - ヘッダーによる組み込みセッションサポート
+   - 追加設定が不要
 
-2. **Why Dynamic Port Allocation?**
-   - Avoids port conflicts
-   - Deterministic for debugging
-   - Large enough range (20k ports) for practical use
+2. **なぜ動的ポート割り当て？**
+   - ポート競合を回避
+   - デバッグのための決定論的
+   - 実用的な使用には十分な範囲（20kポート）
 
-3. **Why 60-second Timeout?**
-   - Balances resource usage vs responsiveness
-   - Allows for brief interruptions
-   - Configurable for different use cases
+3. **なぜ60秒のタイムアウト？**
+   - リソース使用と応答性のバランス
+   - 短時間の中断を許容
+   - 異なる使用ケースに合わせて設定可能
 
-## Dependencies
+## 依存関係
 
-- `playwright-mcp`: The underlying browser automation MCP
-- `fastify`: High-performance web framework
-- `@fastify/http-proxy`: HTTP proxy plugin
-- Standard Node.js libraries (crypto, child_process)
+- `playwright-mcp`: 基盤となるブラウザ自動化MCP
+- `fastify`: 高性能Webフレームワーク
+- `@fastify/http-proxy`: HTTPプロキシプラグイン
+- 標準Node.jsライブラリ（crypto、child_process）
 
-## Monitoring & Debugging
+## モニタリングとデバッグ
 
-- Session registry provides real-time session visibility
-- Child process PIDs tracked for system monitoring
-- Structured logging recommended for production
+- セッションレジストリがリアルタイムセッション可視性を提供
+- システムモニタリング用に子プロセスPIDを追跡
+- プロダクション環境では構造化ログを推奨
 
-This wrapper ensures clean session isolation for browser automation through Claude Code, making it safe to use Playwright MCP in multi-session environments without any additional user configuration.
+このラッパーは、Claude Codeを通じたブラウザ自動化のためのクリーンなセッション分離を保証し、追加のユーザー設定なしにマルチセッション環境でPlaywright MCPを安全に使用できるようにします。
 
-## Claude Code Rules
+## Claude Codeルール
 
 - ルールを追加して欲しいとユーザーから要求された場合は、このCLAUDE.mdファイルにルールを追加すること
 - 熟練OSSエンジニアのようにドキュメントやコードを書くこと
