@@ -140,3 +140,7 @@ claude mcp add --transport http browser http://127.0.0.1:4000/mcp
 - Structured logging recommended for production
 
 This wrapper ensures clean session isolation for browser automation through Claude Code, making it safe to use Playwright MCP in multi-session environments without any additional user configuration.
+
+## Claude Code Rules
+
+- ルールを追加して欲しいとユーザーから要求された場合は、このCLAUDE.mdファイルにルールを追加すること
