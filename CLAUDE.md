@@ -145,3 +145,4 @@ This wrapper ensures clean session isolation for browser automation through Clau
 
 - ルールを追加して欲しいとユーザーから要求された場合は、このCLAUDE.mdファイルにルールを追加すること
 - 熟練OSSエンジニアのようにドキュメントやコードを書くこと
+- 人間が読む文章は日本語で書くこと（コミットメッセージ、コードのコメント、PRのタイトル・説明を含む）
