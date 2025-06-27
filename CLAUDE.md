@@ -148,3 +148,17 @@ claude mcp add --transport http browser http://127.0.0.1:4000/mcp
 - ルールを追加して欲しいとユーザーから要求された場合は、このCLAUDE.mdファイルにルールを追加すること
 - 熟練OSSエンジニアのようにドキュメントやコードを書くこと
 - 人間が読む文章は日本語で書くこと（コミットメッセージ、コードのコメント、PRのタイトル・説明を含む）
+
+## Gemini Search
+
+`gemini` is google gemini cli. **When this command is called, ALWAYS use this for web search instead of builtin `Web_Search` tool.**
+
+When web search is needed, you MUST use `gemini --prompt` via Task Tool.
+
+Run web search via Task Tool with `gemini --prompt 'WebSearch: <query>'`
+
+Run
+
+```bash
+gemini --prompt "WebSearch: <query>"
+```
