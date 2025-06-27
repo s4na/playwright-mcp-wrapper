@@ -1,173 +1,155 @@
-# Playwright MCP Wrapper 設計書
+# 設計書（Ver 1.1）
 
-## 1. 背景と目的
+> **対象読者**
+> フルスタック／DevOps レベルの OSS エンジニアを想定。Node.js/TypeScript で実装する前提で記述。
 
-* **課題**
-  * Claude Code からブラウザ操作用 *Playwright MCP* を呼ぶ際、
-    同一ポートに複数セッションが流れ込むとブラウザ・コンテキストが混線する。
-* **目標**
-  1. Claude Code のセッション単位（≒会話単位）で **隔離された Playwright MCP** を自動起動。
-  2. セッション終了時に当該 Playwright MCP をクリーンに破棄。
-  3. 追加のユーザ操作／ラッパースクリプト無しで実現（`claude mcp add` だけで済む）。
+## 結論 ― セッション単位で完全に分離できます
+
+ラッパー MCP は **`Mcp-Session-Id`** をキーに **Registry** を保持し、未登録セッションが来た瞬間に `playwright-mcp --port 0` を起動します。
+したがって **Claude Code の "1 セッション = 1 Playwright MCP プロセス"** が保証されます。既存セッションからの後続リクエストは同じ子プロセスにルーティングされるため混線は起こりません。
 
 ---
 
-## 2. 技術要件
+## 1. 用語
 
-| 要件                | 充足策                                                                                                                                           |
-| ----------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
-| セッション識別           | Streamable-HTTP で `Mcp-Session-Id` ヘッダーを利用。サーバ側が初回 `initialize` 応答で付与 → 以降のリクエストでクライアント（Claude Code）が自動で送信する仕様 ([modelcontextprotocol.io][1]) |
-| Claude Code 接続方法  | `claude mcp add --transport http browser http://127.0.0.1:4000/mcp` のみ。ローカル HTTP→HTTP 透過プロキシ。                                                 |
-| Playwright MCP 起動 | `npx playwright-mcp --port <dynamic>` ([github.com][2])                                                                                       |
-| ポート衝突回避           | SHA-256(hash(sessionId)) を 2byte 抽出し `20000-39999` にマッピング。                                                                                    |
-| 高速復帰              | MacOS / Linux 共通、子プロセスは lazy-spawn & keep-alive 60 s idle。                                                                                    |
-| セキュリティ            | 127.0.0.1 bind、`Origin` ヘッダー検証、TLS オフロード不要（ローカル限定）。                                                                                           |
+| 略語                 | 意味                                                |
+| ------------------ | ------------------------------------------------- |
+| **Claude Code**    | Anthropic CLI/VSCode 拡張など、エディタ側エージェント             |
+| **Playwright MCP** | `npx playwright-mcp` が提供するブラウザ操作サーバ               |
+| **Wrapper MCP**    | 本設計で新規に実装するプロセス分離・ルーティング層                         |
+| **sid**            | `Mcp-Session-Id`（UUID）＝ Claude Code が会話ごとに帯同する識別子 |
 
----
-
-## 3. 全体アーキテクチャ
+## 2. 全体構成図
 
 ```
-┌────────────┐         HTTP (Streamable)
-│ Claude Code│──▶  Wrapper MCP  ──▶  Playwright MCP  (port = 20xxx)
-└────────────┘         ↑ │                 ↑
-                       │ └─ ChildProcess ──┘
-                       │
-                 Session Registry
+┌────────────┐ 1. initialize         ┌───────────────┐   spawn + stdout   ┌───────────────┐
+│ Claude Code│──────────────────────▶│ Wrapper   MCP │━━━━━━━━━┓         │ Playwright MCP│
+└────────────┘<──2. sid 返却────────└───────────────┘         ┃browse RPC└───────────────┘
+                                      ▲ 3. RPC Proxy ┃
+                                      ┗━━━━━━━━━━━━━━┛
 ```
 
-### 3.1 Wrapper MCP (Session Router)
+* **1 セッション開始**: `initialize` 受信 → sid 生成 → Playwright 起動
+* **3 プロキシ**: 以降の RPC/SSE は sid ↔ port で多重化
 
-| 機能           | 詳細                                                                                               |
-| ------------ | ------------------------------------------------------------------------------------------------ |
-| HTTP エンドポイント | `POST /mcp` (JSON-RPC) / `GET /mcp` (SSE)。                                                       |
-| セッション管理      | 初回 `initialize` 受信時に `uuid.v4()` を生成し `Mcp-Session-Id` レスポンスヘッダーで返却。以降は同ヘッダーでルーティング。             |
-| プロセス生成       | `spawn('npx', ['playwright-mcp', '--port', port], {env, stdio:'ignore'})`                        |
-| ルーティング       | `req.headers['mcp-session-id']` で Playwright プロセスを決定し HTTP Proxy。SSE は `http-proxy` で duplex 転送。 |
-| クリーンアップ      | SSE / HTTP keep-alive が切れた時点から 60 s 後に SIGTERM→SIGKILL。                                          |
+## 3. Wrapper MCP 詳細設計
 
-### 3.2 Session Registry
-
-| Key       | Value                        |
-| --------- | ---------------------------- |
-| sessionId | `{port, childPid, lastSeen}` |
-
-### 3.3 ポート計算アルゴリズム
-
-```ts
-const base = 20000;
-const span = 20000;       // 20000-39999
-const port = base + (parseInt(sha256(sessionId).slice(0,4), 16) % span);
-```
-
----
-
-## 4. コールフロー詳細
-
-1. **Claude Code → Wrapper**
-
-   ```json
-   { "jsonrpc":"2.0", "id":1, "method":"initialize", ... }
-   ```
-2. **Wrapper**
-
-   * `Mcp-Session-Id` が無ければ生成 → `sid`.
-   * `port = calcPort(sid)`
-   * `spawn playwright-mcp --port=port`（既存なら skip）
-   * `res.setHeader('Mcp-Session-Id', sid)` で `initialize` 応答を返却。
-3. **以降のリクエスト**
-
-   * Claude Code が `Mcp-Session-Id: sid` を付与　([modelcontextprotocol.io][1])
-   * Wrapper は `sid` をキーに対象 Playwright MCP へ単純リバースプロキシ。
-4. **シャットダウン**
-
-   * SSE 断線 or `DELETE /mcp?session=<sid>` → Registry から child を terminate。
-
----
-
-## 5. 実装サンプル（Node.js/TypeScript）
-
-```ts
-import crypto from 'crypto';
-import { spawn } from 'child_process';
-import fastify from 'fastify';
-import httpProxy from '@fastify/http-proxy';
-
-const app = fastify();
-const registry = new Map<string, {port:number, proc: any, last:number}>();
-
-function calcPort(sid:string){
-  const h = crypto.createHash('sha256').update(sid).digest('hex');
-  return 20000 + parseInt(h.slice(0,4),16) % 20000;
-}
-
-function ensureWorker(sid:string){
-  if(registry.has(sid)) return registry.get(sid)!;
-  const port = calcPort(sid);
-  const proc = spawn('npx',['playwright-mcp','--port',port],{stdio:'ignore'});
-  registry.set(sid,{port,proc,last:Date.now()});
-  return {port,proc};
-}
-
-app.all('/mcp', async (req, res) => {
-  let sid = req.headers['mcp-session-id'] as string | undefined;
-  if(!sid){ sid = crypto.randomUUID(); res.header('Mcp-Session-Id', sid); }
-  const {port} = ensureWorker(sid);
-  const target = `http://127.0.0.1:${port}/mcp`;
-  return httpProxy.proxy(req.raw, res.raw, { upstream: target });
-});
-
-setInterval(() => {
-  const now = Date.now();
-  for(const [sid,{proc,last}] of registry){
-    if(now-last > 60_000){ proc.kill('SIGTERM'); registry.delete(sid); }
-  }
-}, 30_000);
-
-app.listen({port:4000});
-```
-
----
-
-## 6. テスト計画
-
-| 番号  | テスト内容                   | 期待結果                                                           |
-| --- | ----------------------- | -------------------------------------------------------------- |
-| T-1 | 2 つの VSCode ターミナルで別会話開始 | Wrapper が異なる `Mcp-Session-Id` を発行し、別ポートの Playwright が 2 つ起動する。 |
-| T-2 | 片方の会話を /exit            | 対応する Playwright が 60 s 後に停止。                                   |
-| T-3 | 大量並列 (100 会話)           | ポート衝突なし、メモリ使用が上限内。                                             |
-
----
-
-## 7. セキュリティ・運用
-
-* Wrapper は `127.0.0.1` 限定バインド。外部公開する場合は Nginx + Mutual-TLS 前段推奨。
-* `Origin` ヘッダー必須チェックで DNS rebinding 対策 ([modelcontextprotocol.io][1])
-* Playwright は `--browser chromium --headless` 固定、Proxy 経由アクセスを明示可。
-
----
-
-## 8. 導入手順（最短）
+### 3.1 起動
 
 ```bash
-# 1️⃣ Wrapper MCP をインストール
-npm i -g wrapper-mcp   # ← 上記サンプルを npm パッケージ化
+wrapper-mcp --port 4000
+```
 
-# 2️⃣ 起動
+* Fastify + `@fastify/http-proxy` をベースに実装
+* 127.0.0.1 バインド（外部公開時は Nginx/TLS 前段）
+
+### 3.2 セッション処理フロー（擬コード）
+
+```ts
+if (!sid) {       // 新規セッション
+  sid = uuid.v4();
+  res.setHeader('Mcp-Session-Id', sid);
+
+  {port,proc} = await launchWorker();   // --port 0 で起動し stdout から番号取得
+  registry[sid] = {port,proc,last:now};
+}
+proxy(req, `http://127.0.0.1:${registry[sid].port}/mcp`);
+registry[sid].last = now;
+```
+
+### 3.3 子プロセス生成
+
+```ts
+spawn('npx',['playwright-mcp','--port','0'], {stdio:['ignore','pipe','ignore']});
+stdout.once('data', line => {
+  const m = line.toString().match(/:(\d+)\s*$/);   // 例: …Listening on http://127.0.0.1:31245
+  port = Number(m[1]);
+});
+```
+
+### 3.4 クリーンアップ
+
+* `lastSeen` から **60 s** 無通信で `SIGTERM` → 30 s 後 `SIGKILL`
+* エッジケース: Claude Code が IDE を強制終了した場合もタイムアウトで回収
+
+## 4. Playwright MCP 側要件
+
+| 項目   | 設定値                                                        |
+| ---- | ---------------------------------------------------------- |
+| 引数   | `--port 0 --browser chromium --headless`                   |
+| ロギング | 起動時に **"Listening on http\://…\:PORT"** を 1 行だけ stdout に出す |
+| 終了   | SIGTERM 受信 ⇒ グレースフルシャットダウン                                 |
+
+## 5. プロトコル仕様
+
+| HTTP ヘッダー        | 意味                     | 送信主体              |
+| ---------------- | ---------------------- | ----------------- |
+| `Mcp-Session-Id` | UUIDv4                 | → Claude Code（自動） |
+| `Origin`         | `null` 禁止、`file://` 防止 | → Wrapper で検証     |
+
+## 6. シーケンス（代表ケース）
+
+```mermaid
+sequenceDiagram
+  participant C as Claude Code
+  participant W as Wrapper MCP
+  participant P as Playwright MCP
+  C->>W: initialize
+  alt 初回
+      W->>P: spawn(--port 0)
+      P-->>W: stdout "Listening ... :31245"
+      W-->>C: initialize (header sid)
+  else 既存セッション
+      W-->>C: initialize(cached)
+  end
+  loop 対話中
+      C->>+W: runScript (sid)
+      W->>+P: runScript
+      P-->>-W: result
+      W-->>-C: result
+  end
+```
+
+## 7. セキュリティ
+
+1. **127.0.0.1 リッスン** … ラップ外に直接さらさない
+2. **Origin チェック** … DNS Rebinding 防御
+3. **Port 0 使用** … 衝突リスク皆無、OS が空きを保証
+4. **最小権限** … Playwright は `--disable-gpu` 等でサンドボックス可
+
+## 8. 導入手順
+
+```bash
+# 1. ラッパー MCP インストール
+npm i -g wrapper-mcp   # ← 本実装をパッケージ化
+
+# 2. ラッパー起動
 wrapper-mcp --port 4000 &
 
-# 3️⃣ Claude Code に登録
+# 3. Claude Code 登録
 claude mcp add --transport http browser http://127.0.0.1:4000/mcp
 ```
+
+## 9. テスト計画
+
+| ID | シナリオ                        | 期待結果                                                          |
+| -- | --------------------------- | ------------------------------------------------------------- |
+| T1 | 2 つの VSCode ウィンドウで同時に新規会話開始 | Wrapper が 2 つの sid を発行し、`lsof -i:4000` で Playwright が 2 ポート開く |
+| T2 | 一方を /exit → 60 s 待機         | 対応 Playwright プロセスが kill＝`ps` に残らない                           |
+| T3 | 100 並列セッション                 | エラー無し、ポート衝突無し、メモリ使用 < 800 MB                                  |
+
+## 10. 既知の課題 / 今後の改善
+
+* **stdout 解析失敗時**: タイムアウト 8 s → リトライまたは 50x を返す
+* **大量セッション保持**: `LRU + spool` を導入して上限数を制御予定
+* **Windows 対応**: `lsof` 依存を避け、`netstat -ano` にフォールバック
 
 ---
 
 ### まとめ
 
-* **取得可能なセッション情報**: Streamable-HTTP の `Mcp-Session-Id` を利用すれば Claude Code 側で会話単位に自動で付与されるので取得は容易。
-* **実現可否**: 上記のようにラッパー MCP を立てて Playwright MCP を動的起動・プロキシするだけで要件を満たせる。OSS コンポーネントのみで実装でき、運用もシンプル。
+* Claude Code の **セッション単位で完全分離された Playwright MCP** を自動生成し、
+  OS 任せの空きポートを安全に取得するアーキテクチャを確立。
+* ラッパー MCP は軽量 300 行程度で実装可能、依存は Node.js と Playwright だけ。
 
-不明点や追加要件があれば遠慮なく教えてください！
-
-[1]: https://modelcontextprotocol.io/docs/concepts/transports "Transports - Model Context Protocol"
-[2]: https://github.com/faruklmu17/playwright_mcp?utm_source=chatgpt.com "faruklmu17/playwright_mcp - GitHub"
+この内容で問題なければ実装に進めます。追加要望があれば教えてください！
