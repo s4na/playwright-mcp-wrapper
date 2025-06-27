@@ -144,3 +144,4 @@ This wrapper ensures clean session isolation for browser automation through Clau
 ## Claude Code Rules
 
 - ルールを追加して欲しいとユーザーから要求された場合は、このCLAUDE.mdファイルにルールを追加すること
+- 熟練OSSエンジニアのようにドキュメントやコードを書くこと
