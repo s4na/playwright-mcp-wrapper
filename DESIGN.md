@@ -60,9 +60,9 @@ class SessionHandler {
       // リソースチェック
       await this.resourceManager.ensureCapacity();
       
-      // 新規セッション作成
+      // 新規セッション作成（port: 0でエフェメラルポート使用）
       const session = await this.sessionSpawner.spawnWithRetry({
-        port: 0,
+        port: 0,  // OSが自動的に空きポートを割り当て
         browser: 'chromium',
         headless: true
       });
@@ -384,7 +384,7 @@ app.get('/health', async (req, res) => {
 
 | 項目   | 設定値                                                        |
 | ---- | ---------------------------------------------------------- |
-| 引数   | `--port 0 --browser chromium --headless`                   |
+| 引数   | `--port 0 --browser chromium --headless` ※port 0でOSがエフェメラルポート自動割当 |
 | ロギング | 起動時に **"Listening on http\://…\:PORT"** を 1 行だけ stdout に出す |
 | 終了   | SIGTERM 受信 ⇒ グレースフルシャットダウン                                 |
 
@@ -422,7 +422,7 @@ sequenceDiagram
 
 1. **127.0.0.1 リッスン** … ラップ外に直接さらさない
 2. **Origin チェック** … DNS Rebinding 防御
-3. **Port 0 使用** … 衝突リスク皆無、OS が空きを保証
+3. **エフェメラルポート使用** … ポート0指定でOSが動的割当、衝突リスク皆無
 4. **プロセス分離** … セッション間の完全分離
 5. **リソース制限** … DoS 攻撃への耐性
 
